@@ -143,10 +143,6 @@ export function extractLeadDetails(
       directorName = cleanPersonName(m[1]);
     }
   }
-    if (m && m[1]) {
-      directorName = cleanPersonName(m[1]);
-    }
-  }
 
   // In case companyName still empty, parse before director
   if (!companyName && directorName) {

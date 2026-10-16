@@ -251,7 +251,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           const recognition = new SpeechRecognition();
           recognition.continuous = true;
           recognition.interimResults = true;
-          recognition.lang = 'en-US';
+          recognition.lang = 'en-IN';
 
           recognition.onresult = (event: any) => {
             let fullText = '';
@@ -350,10 +350,18 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
       if (textToSegregate) {
         payload.text = textToSegregate;
       }
-      if (audioBase64 && !textToSegregate) {
+      // Always send the recording too: the browser transcript garbles names, the audio does not.
+      if (audioBase64) {
         payload.audioBase64 = audioBase64;
         payload.mimeType = audioMimeType;
       }
+      payload.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      payload.knownCompanies = Array.from(
+        new Set(leads.map((l) => (l.companyName || '').trim()).filter(Boolean))
+      );
+      payload.knownPeople = Array.from(
+        new Set(leads.map((l) => (l.directorName || '').trim()).filter(Boolean))
+      );
 
       const res = await fetch('/api/voice/segregate', {
         method: 'POST',

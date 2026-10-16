@@ -16,6 +16,7 @@ import {
   isoToDayDate,
   normalizeTime,
   snapToKnown,
+  repairEntities,
 } from './src/utils/voiceExtraction.js';
 import {
   extractLeadDetails,
@@ -67,45 +68,54 @@ async function startServer() {
     const fallbackResult: any = text ? extractLeadDetails(text, today) : null;
 
     try {
-      const prompt = `You extract CRM fields from a sales rep's spoken call note. The rep is in India; speakers often have an Indian English accent and mention Indian business and person names.
+      const hasAudio = Boolean(audioBase64);
+      const prompt = `You are the extraction engine of a sales CRM. A rep in India speaks a short, messy, unscripted call note; you turn it into clean fields. Speakers have Indian English accents and mention Indian business and person names. Speech is often out of order, with fillers and false starts ("I have a meeting with... and his... it's MM Agro Farms").
 
 TODAY: ${todayFormatted} (${toIsoDate(today)}).
-CALENDAR (use this for every date; never calculate dates yourself):
+CALENDAR (use it for every date; never calculate dates yourself):
 ${buildCalendarTable(today)}
 
-${audioBase64 ? 'An audio recording is attached. The AUDIO is the source of truth.' : ''}${
+${
+  hasAudio
+    ? `INPUT: an audio recording is attached. LISTEN TO THE AUDIO; it is the only reliable source.${
         text
-          ? `\nBrowser speech-to-text transcript (noisy; proper nouns are often misspelled, wrongly split, or replaced by common words): "${text}"`
+          ? ` A browser speech-to-text transcript is also given, but it is frequently WRONG and often drops or garbles exactly the names and initials that matter. Use it only as a weak hint, and overrule it whenever the audio disagrees: "${text}"`
           : ''
-      }
+      }`
+    : `INPUT: only a browser speech-to-text transcript, which is noisy (names misspelled, split into common words, or missing): "${text}"`
+}
 
-Step 1 - transcription: ${
-        audioBase64
-          ? 'transcribe the audio faithfully (fix obvious mishearings using the audio).'
-          : 'return the transcript, correcting only obvious speech-to-text errors.'
-      }
+== THE TWO FIELDS THAT MATTER MOST ==
+companyName = the business the rep called or is meeting. directorName = the human on the other side.
 
-Step 2 - extract. The two fields that matter most are companyName and directorName. Be careful with them:
-- companyName: the business being called. Exactly the name, nothing else (no "I called", "the company", "pvt ltd" unless spoken, no sentence). Spell it as a proper business name, e.g. "Sri Murugan Textiles", "MM Agro Farms".
-- directorName: the person spoken to / owner / director / founder / client / contact. First name plus surname if both were said. No titles (Mr, Sir, Madam), no company words. Empty string if no person was named.
-- A person's name inside a business name ("Ravi Traders") belongs to companyName only; do not copy it to directorName unless the speaker names Ravi as the person they spoke to.
-- Names may be misrecognised as ordinary words ("sujay" -> "so jay", "Manjula" -> "mom jula"). Rejoin and repair them into the most plausible real name.
+Who is the person (directorName)? Anyone described by any of: owner, business owner, proprietor, director, managing director, MD, founder, co-founder, CEO, partner, client, customer, contact, contact person, person, proprietor, "the gentleman/lady", "his/her name", "spoke to X", "met X", "meeting with X", "X picked up". All of these mean the same thing: put that name in directorName. Keep first name plus surname if both are said; drop titles (Mr, Mrs, Ms, Sir, Madam, Dr unless part of the name). If no person is named, directorName is "".
+
+What is the company (companyName)? The business name, nothing else: no "I called", "the company", "his company is", no sentence fragments. Business names usually end in or contain words like Agro, Farms, Traders, Textiles, Industries, Enterprises, Exports, Solutions, Motors, Foods, Constructions, Builders, Hotel, Engineering, Pharma, Pvt Ltd. A name containing such a word is a COMPANY, never a person. A person's name inside a business name ("Ravi Traders") belongs to companyName only; do not also put Ravi in directorName unless the rep says Ravi is the person they spoke to.
+
+Spoken initials and spellings (very common in Indian business names): the rep may say letters ("em em", "M M", "double M", "capital M capital M", "S R K", "V K S"). Speech-to-text turns letters into words ("yum yum", "um um", "am am", "him him", "ess are kay"). Write initials as joined capitals: "MM Agro Farms", "SRK Traders", "VKS Exports". Repeated odd syllables at the start of a business name ("yum yum", "um um", "em em") almost always mean spoken initials. If the rep spells a name out, follow the spelling exactly.
+Names may also be run together or split wrongly ("agroforms" is "Agro Farms", "so jay" is "Sujay"); repair them into the most plausible real name. Prefer common Indian spellings of people's names (Arun, Sujay, Manjula, Karthik, Priya...) over look-alike Western names (Aaron, Sue Jay).
 ${
   companies.length
-    ? `- Companies already in the sheet (if the spoken company clearly refers to one of these, use that exact spelling): ${companies.join('; ')}`
+    ? `Companies already in the sheet; if the spoken company clearly refers to one of these, use that exact spelling: ${companies.join('; ')}`
     : ''
 }
-${people.length ? `- People already in the sheet (same rule): ${people.join('; ')}` : ''}
-- Never invent a name that was not said. If unsure, give your best phonetic spelling rather than an empty string for the company.
+${people.length ? `People already in the sheet; same rule: ${people.join('; ')}` : ''}
+Never invent a name that was not said. If the person's name is genuinely inaudible, use "" rather than guessing; if the company is unclear, give your best phonetic spelling.
 
-Other fields:
-- callNumber 1-4 from phrases like "first/second/third/fourth call"; default 1.
-- callDateIso: date the call happened (default today ${toIsoDate(today)}; "yesterday" -> use the calendar-adjacent date).
-- Follow-up: if the rep says something should happen later (follow up, call back, meeting, demo, "tomorrow at 3"), set hasNextFollowUp true, nextFollowUpDateIso from the CALENDAR (a bare weekday name or "next <weekday>" means the first such weekday after today, i.e. never today itself and never skipping a whole extra week; e.g. said on a Friday, "Friday" and "next Friday" both mean the Friday 7 days later), and nextFollowUpTime as 24h "HH:mm" or "" if no time was said. Bare hours without am/pm: 1-6 -> PM, 7-11 -> AM unless said otherwise. "no follow up" -> hasNextFollowUp false.
-- isMeeting: true only if a meeting or demo is being scheduled.
+== OTHER FIELDS ==
+- transcription: ${hasAudio ? 'a faithful transcript of the audio, with initials written joined (MM) and obvious mishearings fixed' : 'the transcript with only obvious speech-to-text errors fixed'}.
+- callNumber 1-4 from "first/second/third/fourth call"; default 1.
+- callDateIso: when the call happened. Default today ${toIsoDate(today)}; "yesterday" uses the calendar.
+- Follow-up or meeting: if anything is planned for later (follow up, call back, meeting, demo, visit, "tomorrow at 3"), hasNextFollowUp = true. nextFollowUpDateIso comes from the CALENDAR: "today"/"tomorrow"/"day after tomorrow" as listed; a bare weekday or "next <weekday>" means the first such weekday after today (never today itself, never an extra week skipped; said on a Friday, "Friday" and "next Friday" both mean 7 days later). A meeting stated with a time but no day ("the meeting is at 5 PM") is today. nextFollowUpTime is 24h "HH:mm", or "" if no time was said. A bare hour without am/pm: 1-6 means PM, 7-11 means AM, unless said. "no follow up" means hasNextFollowUp = false.
+- isMeeting: true only when a meeting or demo is being scheduled (not a plain call back).
 - freeWebsiteStatus: exactly one of "Not Asked", "To Send Free Website", "Free Website Sent", "Website Reviewing", "Declined / Not Needed".
-- companyNumber (phone digits) and email: copy exactly; "" if absent. Spoken emails like "john at gmail dot com" -> john@gmail.com.
-- callNote: one or two clean sentences of what was discussed, in third person, excluding the name/number/date admin already captured.`;
+- companyNumber (digits only, as spoken) and email: copy exactly, "" if absent. "john at gmail dot com" means john@gmail.com.
+- callNote: one or two clean third-person sentences about what was discussed or planned, without repeating the name, number and date fields.
+
+== EXAMPLES ==
+Heard: "I have a meeting with Arun Prakash and his company is em em agro farms, the meeting is at five" -> companyName "MM Agro Farms", directorName "Arun Prakash", meeting today 17:00.
+Heard: "second call, business owner Sujay, it's the Sri Murugan Textiles, call him back tomorrow morning at ten" -> companyName "Sri Murugan Textiles", directorName "Sujay", follow-up tomorrow 10:00.
+Heard: "spoke to the client Ravi Kumar of yes are kay traders, no follow up" -> companyName "SRK Traders", directorName "Ravi Kumar", no follow-up.`;
 
       const parts: any[] = [];
       if (audioBase64) {
@@ -115,8 +125,8 @@ Other fields:
 
       const config = {
         responseMimeType: 'application/json',
-        temperature: 0.1,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        temperature: 0,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -163,7 +173,8 @@ Other fields:
             lastErr = e;
             const msg = String((e as any)?.message || '');
             console.warn(`Gemini model ${model} attempt ${attempt + 1} failed:`, msg.slice(0, 160));
-            const transient = /503|UNAVAILABLE|429|timeout/i.test(msg);
+            // 429 = quota for this model: retrying is pointless, move to the next model instead.
+            const transient = /503|UNAVAILABLE|timeout/i.test(msg);
             if (!transient) break;
             await new Promise((r) => setTimeout(r, 700));
           }
@@ -174,15 +185,17 @@ Other fields:
       const spoken: string = parsedAi.transcription || text || '';
       const rules = extractLeadDetails(spoken, today);
 
+      const repaired = repairEntities(
+        String(parsedAi.companyName || '').trim(),
+        String(parsedAi.directorName || '').trim()
+      );
       const companyName =
-        snapToKnown(cleanEntityString(parsedAi.companyName || ''), companies) ||
+        snapToKnown(repaired.company, companies) ||
         fallbackResult?.companyName ||
         rules.companyName ||
         'New Lead';
       const directorName =
-        snapToKnown(cleanPersonName(parsedAi.directorName || ''), people) ||
-        (parsedAi.directorName ? '' : rules.directorName) ||
-        '';
+        snapToKnown(repaired.director, people) || (parsedAi.directorName ? '' : rules.directorName) || '';
 
       // Dates: trust the model's calendar pick only if it is sane, else fall back to the rules.
       const inRange = (iso: string) => {

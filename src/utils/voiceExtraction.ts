@@ -133,3 +133,60 @@ export function snapToKnown(candidate: string, known: string[]): string {
   }
   return bestScore >= 0.8 ? best : cand;
 }
+
+const COMPANY_WORDS = new Set([
+  'agro', 'agros', 'farm', 'farms', 'traders', 'trading', 'textile', 'textiles', 'industries', 'industry',
+  'enterprises', 'enterprise', 'exports', 'export', 'imports', 'solutions', 'motors', 'foods', 'food',
+  'constructions', 'construction', 'builders', 'hotel', 'hotels', 'engineering', 'pharma', 'pharmaceuticals',
+  'pvt', 'ltd', 'limited', 'private', 'llp', 'corporation', 'corp', 'associates', 'technologies', 'systems',
+  'mills', 'steels', 'steel', 'electricals', 'electronics', 'stores', 'agencies', 'infra', 'developers',
+  'logistics', 'transport', 'travels', 'hospital', 'clinic', 'academy', 'school', 'foundation', 'group',
+]);
+
+const TITLE_RE = /^(mr|mrs|ms|miss|sir|madam|mam|dr|shri|sri|smt|thiru)\.?\s+/i;
+
+/** Join runs of single letters: "M M Agro Farms" -> "MM Agro Farms", "s r k traders" -> "SRK traders". */
+export function joinInitials(name: string): string {
+  const tokens = (name || '').trim().split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  let run: string[] = [];
+  const flush = () => {
+    if (run.length >= 2) out.push(run.join('').toUpperCase());
+    else if (run.length === 1) out.push(run[0]);
+    run = [];
+  };
+  for (const t of tokens) {
+    if (/^[A-Za-z]\.?$/.test(t)) run.push(t.replace('.', ''));
+    else {
+      flush();
+      out.push(t);
+    }
+  }
+  flush();
+  return out.join(' ');
+}
+
+const hasCompanyWord = (s: string) =>
+  s
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .some((w) => COMPANY_WORDS.has(w));
+
+/**
+ * Last line of defence for the two critical fields:
+ * - joins spoken initials in the company name,
+ * - strips titles from the person,
+ * - if the "person" is really a business name, treats it as the company,
+ * - drops a person that merely repeats the company.
+ */
+export function repairEntities(company: string, director: string): { company: string; director: string } {
+  let co = joinInitials((company || '').trim());
+  let dir = (director || '').trim().replace(TITLE_RE, '').trim();
+
+  if (dir && hasCompanyWord(dir)) {
+    if (!co || !hasCompanyWord(co)) co = joinInitials(dir);
+    dir = '';
+  }
+  if (co && dir && normalizeForMatch(co) === normalizeForMatch(dir)) dir = '';
+  return { company: co, director: dir };
+}

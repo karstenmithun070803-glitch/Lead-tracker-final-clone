@@ -43,9 +43,13 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   const [transcript, setTranscript] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [aiNotice, setAiNotice] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioBase64, setAudioBase64] = useState<string | null>(null);
   const [audioMimeType, setAudioMimeType] = useState<string>('audio/webm');
+  // Resolves with the encoded recording once MediaRecorder has fully flushed (state updates lag behind).
+  const audioReadyRef = useRef<Promise<{ b64: string; mime: string } | null> | null>(null);
+  const audioResolveRef = useRef<((v: { b64: string; mime: string } | null) => void) | null>(null);
   const [audioLevel, setAudioLevel] = useState<number>(0);
 
   // Segregated results state
@@ -213,6 +217,9 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
 
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
+      audioReadyRef.current = new Promise((resolve) => {
+        audioResolveRef.current = resolve;
+      });
 
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
@@ -228,9 +235,13 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           try {
             const b64 = await blobToBase64(audioBlob);
             setAudioBase64(b64);
+            audioResolveRef.current?.({ b64, mime: mimeType });
           } catch (err) {
             console.error('Failed to encode audio:', err);
+            audioResolveRef.current?.(null);
           }
+        } else {
+          audioResolveRef.current?.(null);
         }
       };
 
@@ -328,16 +339,28 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   // Instant Segregation: 0-Lag Client-Side Engine + Fast AI Refinement
   const handleSegregateDetails = async () => {
     const textToSegregate = transcript.trim();
-    if (!textToSegregate && !audioBase64) {
+    if (!textToSegregate && !audioBase64 && !isRecording) {
       setErrorMsg('Please record or enter call notes first.');
       return;
     }
 
+    // If still recording, stop and wait for the recording to finish encoding so the audio is
+    // actually sent (the audio, not the browser transcript, is what recovers names accurately).
+    let audioForRequest: { b64: string; mime: string } | null = audioBase64
+      ? { b64: audioBase64, mime: audioMimeType }
+      : null;
     if (isRecording) {
       stopRecording();
+      try {
+        const ready = await audioReadyRef.current;
+        if (ready) audioForRequest = ready;
+      } catch {
+        /* fall back to text only */
+      }
     }
 
     setErrorMsg(null);
+    setAiNotice(null);
 
     // 1. EXTENSIVE OPTIMIZATION: Instant Client-Side Extraction (0ms)
     // User sees the UI update immediately without any wait!
@@ -356,9 +379,9 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
         payload.text = textToSegregate;
       }
       // Always send the recording too: the browser transcript garbles names, the audio does not.
-      if (audioBase64) {
-        payload.audioBase64 = audioBase64;
-        payload.mimeType = audioMimeType;
+      if (audioForRequest) {
+        payload.audioBase64 = audioForRequest.b64;
+        payload.mimeType = audioForRequest.mime;
       }
       payload.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       payload.knownCompanies = Array.from(
@@ -375,7 +398,12 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
       });
 
       if (res.ok) {
-        const aiResult: VoiceSegregationResult = await res.json();
+        const aiResult: VoiceSegregationResult & { source?: string } = await res.json();
+        if (aiResult.source && aiResult.source !== 'ai') {
+          setAiNotice(
+            'AI extraction was unavailable (busy or rate-limited), so this is a basic guess. Check the company and person names, or press Extract again in a minute.'
+          );
+        }
         // Seamlessly refine any field if better
         if (aiResult.companyName && aiResult.companyName !== 'New Lead') {
           applyExtractedResults(aiResult);
@@ -492,6 +520,13 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           <div className="mt-3 p-3 rounded-lg bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300 text-xs border border-rose-200 flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{errorMsg}</span>
+          </div>
+        )}
+
+        {aiNotice && (
+          <div className="mt-3 p-3 rounded-lg bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 text-xs border border-amber-200 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{aiNotice}</span>
           </div>
         )}
 

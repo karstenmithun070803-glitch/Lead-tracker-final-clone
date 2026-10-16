@@ -271,7 +271,12 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
       }
     } catch (err: any) {
       console.error('Mic error:', err);
-      setErrorMsg(`Microphone error: ${err.message || 'Unable to access microphone'}`);
+      const denied = err?.name === 'NotAllowedError' || /denied|permission/i.test(err?.message || '');
+      setErrorMsg(
+        denied
+          ? 'Microphone blocked. Open this app in Chrome or Safari (not an embedded preview), click the lock icon in the address bar, set Microphone to Allow, then reload. Also check System Settings > Privacy & Security > Microphone for that browser. You can still type or paste the call note.'
+          : `Microphone error: ${err.message || 'Unable to access microphone'}`
+      );
       setIsRecording(false);
     }
   };

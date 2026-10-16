@@ -26,9 +26,39 @@ export const SCOPES = [
 const provider = new GoogleAuthProvider();
 SCOPES.forEach((scope) => provider.addScope(scope));
 
-// In-memory token storage (per skill requirements: NEVER store in localStorage)
+// Google access tokens live ~1 hour and cannot be refreshed client-side. Keep one in memory and
+// mirror it to sessionStorage (this tab only, never localStorage) so a page reload or dev
+// hot-reload does not force a new Google sign-in. It is dropped once it is about to expire.
+const TOKEN_KEY = 'lt_google_access_token';
+const TOKEN_TTL_MS = 55 * 60 * 1000;
+
+const saveToken = (token: string | null) => {
+  try {
+    if (token) {
+      sessionStorage.setItem(TOKEN_KEY, JSON.stringify({ token, exp: Date.now() + TOKEN_TTL_MS }));
+    } else {
+      sessionStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    /* storage unavailable: in-memory only */
+  }
+};
+
+const loadToken = (): string | null => {
+  try {
+    const raw = sessionStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    const { token, exp } = JSON.parse(raw);
+    if (token && typeof exp === 'number' && exp > Date.now()) return token;
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+  return null;
+};
+
 let isSigningIn = false;
-let cachedAccessToken: string | null = null;
+let cachedAccessToken: string | null = loadToken();
 
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
@@ -44,6 +74,7 @@ export const initAuth = (
       }
     } else {
       cachedAccessToken = null;
+      saveToken(null);
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -59,6 +90,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
 
     cachedAccessToken = credential.accessToken;
+    saveToken(cachedAccessToken);
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error('Sign in error:', error);
@@ -74,9 +106,11 @@ export const getAccessToken = async (): Promise<string | null> => {
 
 export const setCachedAccessToken = (token: string | null) => {
   cachedAccessToken = token;
+  saveToken(token);
 };
 
 export const logout = async () => {
   await signOut(auth);
   cachedAccessToken = null;
+  saveToken(null);
 };

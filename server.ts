@@ -6,7 +6,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import path from 'path';
 import { resolveDateAndTimeString, formatDayDate } from './src/utils/dateResolver.js';
 import {
@@ -101,7 +101,7 @@ ${people.length ? `- People already in the sheet (same rule): ${people.join('; '
 Other fields:
 - callNumber 1-4 from phrases like "first/second/third/fourth call"; default 1.
 - callDateIso: date the call happened (default today ${toIsoDate(today)}; "yesterday" -> use the calendar-adjacent date).
-- Follow-up: if the rep says something should happen later (follow up, call back, meeting, demo, "tomorrow at 3"), set hasNextFollowUp true, nextFollowUpDateIso from the CALENDAR (weekday names resolve to the NEXT upcoming such day; "next <weekday>" is the one after), and nextFollowUpTime as 24h "HH:mm" or "" if no time was said. Bare hours without am/pm: 1-6 -> PM, 7-11 -> AM unless said otherwise. "no follow up" -> hasNextFollowUp false.
+- Follow-up: if the rep says something should happen later (follow up, call back, meeting, demo, "tomorrow at 3"), set hasNextFollowUp true, nextFollowUpDateIso from the CALENDAR (a bare weekday name or "next <weekday>" means the first such weekday after today, i.e. never today itself and never skipping a whole extra week; e.g. said on a Friday, "Friday" and "next Friday" both mean the Friday 7 days later), and nextFollowUpTime as 24h "HH:mm" or "" if no time was said. Bare hours without am/pm: 1-6 -> PM, 7-11 -> AM unless said otherwise. "no follow up" -> hasNextFollowUp false.
 - isMeeting: true only if a meeting or demo is being scheduled.
 - freeWebsiteStatus: exactly one of "Not Asked", "To Send Free Website", "Free Website Sent", "Website Reviewing", "Declined / Not Needed".
 - companyNumber (phone digits) and email: copy exactly; "" if absent. Spoken emails like "john at gmail dot com" -> john@gmail.com.
@@ -116,7 +116,7 @@ Other fields:
       const config = {
         responseMimeType: 'application/json',
         temperature: 0.1,
-        thinkingConfig: { thinkingBudget: 1024 },
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -139,23 +139,34 @@ Other fields:
       };
 
       const models = Array.from(
-        new Set([process.env.GEMINI_MODEL, 'gemini-2.5-flash'].filter(Boolean) as string[])
+        new Set(
+          [process.env.GEMINI_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'].filter(
+            Boolean
+          ) as string[]
+        )
       );
       let parsedAi: any = null;
       let lastErr: any = null;
-      for (const model of models) {
-        try {
-          const response: any = await Promise.race([
-            ai.models.generateContent({ model, contents: { parts }, config }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('AI request timeout')), 25000)),
-          ]);
-          if (response?.text) {
-            parsedAi = JSON.parse(response.text.trim());
-            break;
+      // Models can return transient 503s under load: retry each briefly, then move on.
+      outer: for (const model of models) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response: any = await Promise.race([
+              ai.models.generateContent({ model, contents: { parts }, config }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('AI request timeout')), 20000)),
+            ]);
+            if (response?.text) {
+              parsedAi = JSON.parse(response.text.trim());
+              break outer;
+            }
+          } catch (e) {
+            lastErr = e;
+            const msg = String((e as any)?.message || '');
+            console.warn(`Gemini model ${model} attempt ${attempt + 1} failed:`, msg.slice(0, 160));
+            const transient = /503|UNAVAILABLE|429|timeout/i.test(msg);
+            if (!transient) break;
+            await new Promise((r) => setTimeout(r, 700));
           }
-        } catch (e) {
-          lastErr = e;
-          console.warn(`Gemini model ${model} failed:`, (e as any)?.message);
         }
       }
       if (!parsedAi) throw lastErr || new Error('No AI response');
